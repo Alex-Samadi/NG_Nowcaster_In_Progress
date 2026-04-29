@@ -1,0 +1,7 @@
+{
+  "train_mae": 7.08,
+  "train_rmse": 9.44,
+  "test_mae": 19.46,
+  "test_rmse": 28.74,
+  "test_mape_big_weeks": 20.13
+}
