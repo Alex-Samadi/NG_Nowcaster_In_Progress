@@ -1,10 +1,10 @@
 """
 model.py - train / evaluate / persist nowcast models
 
-three pieces:
-    1. GradientBoosting regression  (main workhorse)
-    2. ARIMA on residuals           (catch autocorrelation the tree misses)
-    3. regime classifier            (weather-dominant vs fundamental-driven weeks)
+pieces:
+    1. GradientBoosting / Ridge regression   (the nowcast)
+    2. naive benchmarks + walk-forward test   (is it actually better?)
+    3. regime tagging                         (weather-dominant vs fundamental-driven weeks)
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -35,6 +35,8 @@ class TrainedModel:
     test_mae: float = 0.0
     test_rmse: float = 0.0
     test_mape_big: float = 0.0  # MAPE on |actual| >= 50 only
+    test_start: Any = None
+    baseline_mae: dict = field(default_factory=dict)  # test MAE of naive benchmarks
 
 
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -54,6 +56,19 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 # ── training ─────────────────────────────────────────────────────────
 
+def _make_model(model_type: str):
+    if model_type == "gbrt":
+        return GradientBoostingRegressor(
+            n_estimators=400,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            min_samples_leaf=10,
+            random_state=42,
+        )
+    return Ridge(alpha=1.0)
+
+
 def train(
     df: pd.DataFrame,
     test_years: int = 2,
@@ -62,7 +77,7 @@ def train(
     """
     time-split train/test, fit model, return (TrainedModel, df_with_preds).
     """
-    df = df.sort_values("report_period_ending").copy()
+    df = add_five_year_avg(df.sort_values("report_period_ending"))
 
     # time split
     cutoff = df["report_period_ending"].max()
@@ -79,19 +94,7 @@ def train(
 
     print(f"  train: {train_mask.sum()} rows  |  test: {test_mask.sum()} rows")
 
-    # pick model
-    if model_type == "gbrt":
-        mdl = GradientBoostingRegressor(
-            n_estimators=400,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            min_samples_leaf=10,
-            random_state=42,
-        )
-    else:
-        mdl = Ridge(alpha=1.0)
-
+    mdl = _make_model(model_type)
     mdl.fit(X_train, y_train)
 
     # predictions
@@ -111,9 +114,45 @@ def train(
         test_mae=te_m["mae"],
         test_rmse=te_m["rmse"],
         test_mape_big=te_m["mape_big"],
+        test_start=cutoff,
+        baseline_mae={
+            name: float((df.loc[test_mask, TARGET_COL] - df.loc[test_mask, col]).abs().mean())
+            for name, col in [("last_week", "storage_chg_lag1"), ("five_year_avg", "five_yr_avg")]
+        },
     )
 
     return tm, df
+
+
+def walk_forward(df: pd.DataFrame, years: range) -> pd.DataFrame:
+    """train on everything before each year, test on that year. one row per year,
+    MAE (Bcf) for each model + the 5-year-average benchmark."""
+    df = add_five_year_avg(df)
+    d = pd.to_datetime(df["report_period_ending"])
+    rows = []
+    for yr in years:
+        tr, te = d.dt.year < yr, d.dt.year == yr
+        if not te.any():
+            continue
+        y = df.loc[te, TARGET_COL]
+        row = {"year": yr, "weeks": int(te.sum())}
+        for name in ["gbrt", "ridge"]:
+            m = _make_model(name).fit(df.loc[tr, FEATURE_COLS].values, df.loc[tr, TARGET_COL].values)
+            row[name] = float(np.abs(m.predict(df.loc[te, FEATURE_COLS].values) - y).mean())
+        row["five_year_avg"] = float((df.loc[te, "five_yr_avg"] - y).abs().mean())
+        rows.append(row)
+    return pd.DataFrame(rows).round(1)
+
+
+def add_five_year_avg(df: pd.DataFrame) -> pd.DataFrame:
+    """same-week average of the prior 5 years: the benchmark EIA itself reports against"""
+    df = df.copy()
+    woy = pd.to_datetime(df["report_period_ending"]).dt.isocalendar().week
+    df["five_yr_avg"] = (
+        df.groupby(woy)[TARGET_COL]
+        .transform(lambda s: s.shift(1).rolling(5, min_periods=3).mean())
+    )
+    return df
 
 
 # ── regime detection ─────────────────────────────────────────────────

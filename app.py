@@ -5,437 +5,279 @@ run:  streamlit run app.py
 """
 from __future__ import annotations
 import json
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
-import numpy as np
+import altair as alt
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-# ── page config ──────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="NG Storage Nowcaster",
-    page_icon="🔥",
-    layout="wide",
-)
+st.set_page_config(page_title="NG Storage Nowcaster", page_icon="🔥", layout="wide")
 
-# ── paths ────────────────────────────────────────────────────────────
 OUTPUTS   = Path("outputs")
-MODELS    = Path("models")
 DATASET   = OUTPUTS / "weekly_dataset.csv"
 METRICS   = OUTPUTS / "metrics.json"
+WALK_FWD  = OUTPUTS / "walk_forward.csv"
 REVISIONS = OUTPUTS / "revisions.csv"
-CONSENSUS = OUTPUTS / "consensus_history.csv"
-MODEL_F   = MODELS / "model.joblib"
+MODEL_F   = Path("models/model.joblib")
+
+ACTUAL, MODEL, BENCH = "#1f2937", "#2563eb", "#d97706"
+SERIES_COLORS = alt.Scale(domain=["EIA actual", "model", "5-yr average"], range=[ACTUAL, MODEL, BENCH])
+WF_LABELS = {"gbrt": "gradient boosting", "ridge": "ridge (linear)", "five_year_avg": "5-yr average"}
+WF_COLORS = alt.Scale(domain=list(WF_LABELS.values()), range=[MODEL, "#7c3aed", BENCH])
 
 
-# ── helpers ──────────────────────────────────────────────────────────
+# ── data ─────────────────────────────────────────────────────────────
 
-def _most_recent_friday(d: date) -> date:
-    wd = d.weekday()
-    delta = (wd - 4) % 7
-    return d - timedelta(days=delta)
+if not (DATASET.exists() and METRICS.exists() and MODEL_F.exists()):
+    st.error("No trained model yet. Run `python run.py backtest --start 2010-01-01` first.")
+    st.stop()
 
-
-def _load_dataset() -> pd.DataFrame | None:
-    if not DATASET.exists():
-        return None
-    df = pd.read_csv(DATASET, parse_dates=["report_period_ending"])
-    df["report_period_ending"] = df["report_period_ending"].dt.date
-    return df
+df = pd.read_csv(DATASET, parse_dates=["report_period_ending"])
+metrics = json.loads(METRICS.read_text())
+test_start = pd.Timestamp(metrics["test_start"])
+base = metrics["baseline_test_mae"]
+wf = pd.read_csv(WALK_FWD) if WALK_FWD.exists() else None
 
 
-def _load_metrics() -> dict | None:
-    if not METRICS.exists():
-        return None
-    return json.loads(METRICS.read_text())
+def long_form(frame: pd.DataFrame, cols: dict) -> pd.DataFrame:
+    out = frame[["report_period_ending", *cols]].rename(columns=cols)
+    return out.melt("report_period_ending", var_name="series", value_name="Bcf")
 
 
-def _load_consensus() -> pd.DataFrame:
-    if not CONSENSUS.exists():
-        return pd.DataFrame(columns=["report_period_ending", "consensus_bcf", "source"])
-    df = pd.read_csv(CONSENSUS, parse_dates=["report_period_ending"])
-    df["report_period_ending"] = df["report_period_ending"].dt.date
-    return df
+def test_band(frame: pd.DataFrame) -> alt.Chart:
+    """shaded rectangle over the out-of-sample period"""
+    band = pd.DataFrame({"start": [test_start], "end": [frame["report_period_ending"].max()]})
+    return alt.Chart(band).mark_rect(opacity=0.07, color=MODEL).encode(x="start:T", x2="end:T")
 
 
-def _save_consensus(df: pd.DataFrame):
-    OUTPUTS.mkdir(exist_ok=True)
-    df.to_csv(CONSENSUS, index=False)
-
-
-def _load_revisions() -> pd.DataFrame | None:
-    if not REVISIONS.exists():
-        return None
-    return pd.read_csv(REVISIONS, parse_dates=["run_date", "week_ending"])
+def series_chart(frame: pd.DataFrame, cols: dict, height=320) -> alt.Chart:
+    lines = alt.Chart(long_form(frame, cols)).mark_line(strokeWidth=1.6).encode(
+        x=alt.X("report_period_ending:T", title=None),
+        y=alt.Y("Bcf:Q", title="weekly storage change (Bcf)"),
+        color=alt.Color("series:N", scale=SERIES_COLORS, legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("report_period_ending:T", title="week ending"), "series:N",
+                 alt.Tooltip("Bcf:Q", format="+.1f")],
+    )
+    return (test_band(frame) + lines).properties(height=height)
 
 
 # ── sidebar ──────────────────────────────────────────────────────────
 
-st.sidebar.title("NG Storage Nowcaster")
-st.sidebar.caption("weather -> storage -> edge")
-
-page = st.sidebar.radio(
-    "navigate",
-    ["live nowcast", "backtest history", "model vs consensus", "revision tracker"],
-)
-
-metrics = _load_metrics()
-if metrics:
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**model performance (test)**")
-    st.sidebar.metric("MAE", f"{metrics['test_mae']:.1f} Bcf")
-    st.sidebar.metric("RMSE", f"{metrics['test_rmse']:.1f} Bcf")
-    mape = metrics.get("test_mape_big_weeks")
-    if mape is not None:
-        st.sidebar.metric("MAPE (big weeks)", f"{mape:.1f}%")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    "**how to use**\n\n"
-    "1. run `python run.py backtest` to train\n"
-    "2. run `python run.py live` or use this UI\n"
-    "3. enter consensus to see divergence signal"
+st.sidebar.title("🔥 NG Storage Nowcaster")
+st.sidebar.caption("Predicts the weekly EIA natural gas storage change from weather, before the report drops.")
+page = st.sidebar.radio("Page", ["Overview", "Nowcast", "Backtest", "Revisions"], label_visibility="collapsed")
+st.sidebar.divider()
+st.sidebar.caption(
+    f"Trained on {df['report_period_ending'].min():%b %Y} – {df['report_period_ending'].max():%b %Y}. "
+    f"Out-of-sample test from {test_start:%b %Y} (shaded on charts)."
 )
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PAGE: LIVE NOWCAST
+#  OVERVIEW
 # ═══════════════════════════════════════════════════════════════════
 
-if page == "live nowcast":
-    st.title("live nowcast")
+if page == "Overview":
+    st.title("NG Storage Nowcaster")
     st.markdown(
-        "run a prediction for the current/upcoming EIA storage report. "
-        "the model uses HDD/CDD + lags + seasonality to estimate the weekly "
-        "storage change (Bcf). compare against consensus to find divergence."
+        "Every Thursday the EIA reports how much natural gas went into or out of US storage, and prices move on it. "
+        "Most of that number is **weather**: cold weeks burn gas for heat, hot weeks burn it for power. "
+        "This model turns NOAA degree-day data into a storage estimate **days before the report**, "
+        "then flags weeks where it disagrees with the market consensus."
     )
 
-    if not MODEL_F.exists():
-        st.error(
-            "no trained model found. run this first:\n\n"
-            "```\npython run.py backtest --start 2014-01-01 --test-years 2\n```"
+    improvement = 1 - metrics["test_mae"] / base["five_year_avg"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Model error (test MAE)", f"{metrics['test_mae']:.1f} Bcf")
+    c2.metric("5-yr average error", f"{base['five_year_avg']:.1f} Bcf",
+              help="Same week averaged over the prior 5 years — the benchmark EIA itself reports against.")
+    c3.metric("Error reduction", f"{improvement:.0%}", help="vs the 5-year-average benchmark")
+    if wf is not None:
+        c4.metric("Years beating benchmark", f"{(wf['gbrt'] < wf['five_year_avg']).sum()} / {len(wf)}",
+                  help="Walk-forward: each year predicted by a model trained only on prior years.")
+
+    st.subheader("Out-of-sample: model vs EIA actual")
+    recent = df[df["report_period_ending"] >= test_start - pd.DateOffset(years=1)]
+    cols = {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-yr average"}
+    st.altair_chart(series_chart(recent, cols), width="stretch")
+    st.caption("Shaded region = data the model never saw during training. Negative = withdrawal, positive = injection.")
+
+    if wf is not None:
+        st.subheader("Does it hold up every year?")
+        st.caption("Walk-forward test: for each year, train on all prior years only, then predict that year.")
+        wf_long = wf.rename(columns=WF_LABELS).melt(["year", "weeks"], list(WF_LABELS.values()),
+                                                     var_name="series", value_name="MAE")
+        st.altair_chart(
+            alt.Chart(wf_long).mark_line(point=True).encode(
+                x=alt.X("year:O", title=None),
+                y=alt.Y("MAE:Q", title="mean absolute error (Bcf)", scale=alt.Scale(zero=True)),
+                color=alt.Color("series:N", scale=WF_COLORS, legend=alt.Legend(orient="top", title=None)),
+                tooltip=["year", "series", "MAE", "weeks"],
+            ).properties(height=260),
+            width="stretch",
         )
-        st.stop()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        report_date = st.date_input(
-            "EIA report date (Thursday)",
-            value=date.today(),
-            help="the Thursday the report drops. covered week = prior Friday.",
-        )
-        # covered week = most recent Friday before report date
-        covered_week = _most_recent_friday(report_date - timedelta(days=1))
-        st.info(f"covered storage week ending: **{covered_week}**")
+    st.subheader("How it works")
+    a, b, c, d = st.columns(4)
+    a.markdown("**1 · Weather**  \nNOAA CPC daily heating & cooling degree days, summed over each Sat→Fri storage week.")
+    b.markdown("**2 · Features**  \nDegree days, their deviation from seasonal norm, lagged storage changes, seasonality.")
+    c.markdown("**3 · Model**  \nGradient-boosted trees, time-split train/test — no shuffling, no look-ahead.")
+    d.markdown("**4 · Signal**  \nCompare to consensus; flag the gap only in weeks where weather is the main driver.")
 
-    with col2:
-        consensus_input = st.number_input(
-            "consensus estimate (Bcf)",
-            value=0.0,
-            step=1.0,
-            help="from Celsius, NGI, or wherever you get it. negative = withdrawal.",
-        )
-        use_consensus = st.checkbox("compare to consensus", value=consensus_input != 0.0)
 
-    if st.button("run nowcast", type="primary"):
-        with st.spinner("pulling data + running model ..."):
-            from src.live import nowcast, log_revision
+# ═══════════════════════════════════════════════════════════════════
+#  NOWCAST
+# ═══════════════════════════════════════════════════════════════════
 
-            consensus_val = consensus_input if use_consensus else None
+elif page == "Nowcast":
+    from src.live import nowcast, log_revision, divergence_signal
+
+    st.title("Nowcast a storage week")
+
+    last = df["report_period_ending"].max().date()
+    nxt = last + timedelta(days=7)
+    weeks = [nxt] + sorted(df["report_period_ending"].dt.date.unique(), reverse=True)[:52]
+    actuals = df.set_index(df["report_period_ending"].dt.date)["storage_change_bcf"]
+
+    c1, c2 = st.columns([2, 1])
+    week = c1.selectbox(
+        "Storage week ending (Friday)", weeks,
+        format_func=lambda w: f"{w:%a %b %d, %Y}" + ("  —  not yet reported" if w == nxt else ""),
+        help="EIA storage weeks run Saturday→Friday; the report comes out the following Thursday.",
+    )
+    consensus = c2.number_input("Consensus (Bcf, optional)", value=None, step=1.0,
+                                placeholder="e.g. -85", help="From Reuters/Bloomberg/NGI. Negative = withdrawal.")
+
+    if st.button("Run nowcast", type="primary"):
+        with st.spinner("Pulling weather + storage data…"):
             try:
-                result = nowcast(week_end=covered_week, consensus_bcf=consensus_val)
+                st.session_state.result = nowcast(week_end=week, consensus_bcf=consensus)
+                log_revision(st.session_state.result)
             except Exception as e:
-                st.error(f"nowcast failed: {e}")
-                st.stop()
+                st.error(f"Nowcast failed: {e}")
 
-            log_revision(result)
+    r = st.session_state.get("result")
+    if r and r["week_ending"] == week:
+        st.divider()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Predicted change", f"{r['pred_bcf']:+.1f} Bcf")
+        m2.metric("±1 RMSE range", f"{r['confidence_lo']:+.0f} to {r['confidence_hi']:+.0f}")
+        m3.metric("Heating degree days", f"{r['week_hdd']:.0f}", f"{r['hdd_deviation']:+.0f} vs normal",
+                  delta_color="off")
+        if week in actuals.index:
+            err = r["pred_bcf"] - actuals[week]
+            m4.metric("EIA actual", f"{actuals[week]:+.0f} Bcf", f"model off by {err:+.1f}", delta_color="off")
+        else:
+            m4.metric("EIA actual", "pending")
 
-        # display results
-        st.markdown("---")
-        st.subheader("prediction")
+        if "weather_dominant" in r["regime_hint"]:
+            st.info("**Weather-driven week.** Temperatures were far from normal, so weather explains most of "
+                    "this week's move — a gap vs consensus is most meaningful here.")
+        else:
+            st.info("**Near-normal weather.** LNG exports, production and power burn matter more this week; "
+                    "treat any gap vs consensus with caution.")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("predicted Δ storage", f"{result['pred_bcf']:+.1f} Bcf")
-        c2.metric("confidence band", f"[{result['confidence_lo']:+.1f}, {result['confidence_hi']:+.1f}]")
-        c3.metric("week HDD", f"{result['week_hdd']:.0f}")
-
-        st.markdown(f"**HDD vs seasonal:** {result['hdd_deviation']:+.1f}  |  **regime hint:** {result['regime_hint']}")
-
-        if use_consensus and result["gap_bcf"] is not None:
-            st.markdown("---")
-            st.subheader("consensus comparison")
-
-            gc1, gc2, gc3 = st.columns(3)
-            gc1.metric("consensus", f"{consensus_input:+.1f} Bcf")
-            gc2.metric("gap (model − consensus)", f"{result['gap_bcf']:+.1f} Bcf")
-
-            abs_gap = abs(result["gap_bcf"])
-            if abs_gap < 5:
-                signal_text = "NEUTRAL"
-                signal_color = "gray"
-            elif abs_gap < 15:
-                signal_text = "MODERATE divergence"
-                signal_color = "orange"
-            elif abs_gap < 25:
-                signal_text = "HIGH divergence"
-                signal_color = "red"
-            else:
-                signal_text = "EXTREME divergence"
-                signal_color = "red"
-
-            direction = "BULLISH (model expects larger draw)" if result["gap_bcf"] < 0 else "BEARISH (model expects smaller draw)"
-            gc3.metric("signal", f"{signal_text}")
-            st.markdown(f"**direction:** {direction}")
-
-            # save consensus to history
-            cons_df = _load_consensus()
-            new_row = pd.DataFrame([{
-                "report_period_ending": covered_week,
-                "consensus_bcf": consensus_input,
-                "source": "manual",
-            }])
-            cons_df = pd.concat([cons_df, new_row], ignore_index=True)
-            cons_df = cons_df.drop_duplicates(subset=["report_period_ending"], keep="last")
-            _save_consensus(cons_df)
+        if r["gap_bcf"] is not None:
+            strength, direction = divergence_signal(r["gap_bcf"])
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Consensus", f"{r['consensus_bcf']:+.1f} Bcf")
+            g2.metric("Model − consensus", f"{r['gap_bcf']:+.1f} Bcf")
+            g3.metric("Divergence", strength.title())
+            st.markdown(f"**Read:** {direction}.")
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PAGE: BACKTEST HISTORY
+#  BACKTEST
 # ═══════════════════════════════════════════════════════════════════
 
-elif page == "backtest history":
-    st.title("backtest history")
+elif page == "Backtest":
+    st.title("Backtest")
 
-    df = _load_dataset()
-    if df is None:
-        st.warning("no dataset found. run `python run.py backtest` first.")
-        st.stop()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Train MAE", f"{metrics['train_mae']:.1f} Bcf")
+    c2.metric("Test MAE", f"{metrics['test_mae']:.1f} Bcf")
+    c3.metric("Test RMSE", f"{metrics['test_rmse']:.1f} Bcf")
 
-    # ── accuracy over time ────────────────────────────────────────
-    st.subheader("model vs actual (storage change)")
+    st.subheader("Full history")
+    st.altair_chart(series_chart(df, {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-yr average"}, height=280),
+                    width="stretch")
 
-    if "pred_bcf" in df.columns:
-        fig, ax = plt.subplots(figsize=(14, 5))
-        dates = pd.to_datetime(df["report_period_ending"])
-        ax.plot(dates, df["storage_change_bcf"], label="actual", color="#2563eb", linewidth=1.2)
-        ax.plot(dates, df["pred_bcf"], label="model", color="#dc2626", linewidth=1.0, alpha=0.8)
-        ax.fill_between(
-            dates,
-            df["pred_bcf"] - 20,
-            df["pred_bcf"] + 20,
-            alpha=0.1, color="#dc2626", label="±RMSE band"
+    left, right = st.columns(2)
+    with left:
+        st.subheader("What drives the prediction")
+        import joblib
+        tm = joblib.load(MODEL_F)
+        if hasattr(tm.model, "feature_importances_"):
+            imp = pd.DataFrame({"feature": tm.feature_names, "importance": tm.model.feature_importances_})
+            st.altair_chart(
+                alt.Chart(imp).mark_bar(color=MODEL).encode(
+                    x=alt.X("importance:Q", title="share of splits (GBRT importance)", axis=alt.Axis(format="%")),
+                    y=alt.Y("feature:N", sort="-x", title=None),
+                ).properties(height=380),
+                width="stretch",
+            )
+        else:
+            st.caption("Feature importance is shown for the GBRT model only.")
+
+    with right:
+        st.subheader("Test-period errors")
+        test = df[df["report_period_ending"] >= test_start]
+        st.altair_chart(
+            alt.Chart(test).mark_bar(color=MODEL, opacity=0.8).encode(
+                x=alt.X("residual:Q", bin=alt.Bin(maxbins=30), title="actual − predicted (Bcf)"),
+                y=alt.Y("count()", title="weeks"),
+            ).properties(height=200),
+            width="stretch",
         )
-        ax.set_ylabel("Bcf")
-        ax.legend(loc="lower left")
-        ax.xaxis.set_major_locator(mdates.YearLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-        plt.tight_layout()
-        st.pyplot(fig)
+        bias = test["residual"].mean()
+        st.caption(f"Mean error {bias:+.1f} Bcf — {'roughly unbiased' if abs(bias) < 3 else 'some systematic bias'}.")
 
-    # ── residual distribution ─────────────────────────────────────
-    if "residual" in df.columns:
-        st.subheader("residual distribution")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            fig2, ax2 = plt.subplots(figsize=(6, 4))
-            ax2.hist(df["residual"].dropna(), bins=40, color="#2563eb", alpha=0.7, edgecolor="white")
-            ax2.axvline(0, color="#dc2626", linestyle="--", linewidth=1)
-            ax2.set_xlabel("residual (Bcf)")
-            ax2.set_ylabel("count")
-            plt.tight_layout()
-            st.pyplot(fig2)
-
-        with col2:
-            fig3, ax3 = plt.subplots(figsize=(6, 4))
-            dates = pd.to_datetime(df["report_period_ending"])
-            ax3.scatter(dates, df["residual"], s=8, alpha=0.5, color="#2563eb")
-            ax3.axhline(0, color="#dc2626", linestyle="--", linewidth=1)
-            ax3.set_ylabel("residual (Bcf)")
-            ax3.xaxis.set_major_locator(mdates.YearLocator())
-            ax3.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-            plt.tight_layout()
-            st.pyplot(fig3)
-
-    # ── regime breakdown ──────────────────────────────────────────
-    if "regime" in df.columns:
-        st.subheader("regime breakdown")
-        regime_stats = df.groupby("regime").agg(
-            count=("residual", "count"),
-            mae=("residual", lambda x: x.abs().mean()),
-            rmse=("residual", lambda x: (x**2).mean()**0.5),
+        st.subheader("Error by regime")
+        reg = test.groupby("regime")["residual"].agg(
+            weeks="count", MAE=lambda x: x.abs().mean()
         ).round(1)
-        st.dataframe(regime_stats)
+        st.dataframe(reg, width="stretch")
+        st.caption("Regime is tagged after the fact: *weather_dominant* weeks are ones the weather model explained well; "
+                   "*fundamental_driven* ones had something else (LNG, production, power burn) move storage.")
 
-        st.markdown(
-            "**weather_dominant** = model residual is small -> weather explained the move.  \n"
-            "**fundamental_driven** = model missed -> something else (LNG, production, etc.) drove it.  \n"
-            "**your edge:** when you're in a weather_dominant regime AND your model diverges from consensus, lean into it."
-        )
+    if wf is not None:
+        st.subheader("Walk-forward by year (MAE, Bcf)")
+        st.dataframe(wf.rename(columns=WF_LABELS).set_index("year"), width="stretch")
 
-    # ── raw data ──────────────────────────────────────────────────
-    with st.expander("raw dataset (last 20 weeks)"):
-        show_cols = [
-            "report_period_ending", "storage_change_bcf", "pred_bcf",
-            "residual", "week_hdd", "week_cdd", "hdd_deviation", "regime",
-        ]
-        show_cols = [c for c in show_cols if c in df.columns]
-        st.dataframe(df[show_cols].tail(20).reset_index(drop=True))
+    with st.expander("Last 20 weeks of data"):
+        cols = ["report_period_ending", "storage_change_bcf", "pred_bcf", "residual",
+                "week_hdd", "week_cdd", "hdd_deviation", "regime"]
+        st.dataframe(df[cols].tail(20).iloc[::-1].reset_index(drop=True), width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PAGE: MODEL VS CONSENSUS
+#  REVISIONS
 # ═══════════════════════════════════════════════════════════════════
 
-elif page == "model vs consensus":
-    st.title("model vs EIA actual vs consensus")
-    st.markdown(
-        "compare your weather-model predictions against the actual EIA number "
-        "and (when available) the Celsius/street consensus. "
-        "this is where you see if your model adds value."
-    )
+elif page == "Revisions":
+    st.title("Revision tracker")
+    st.markdown("Each nowcast run is logged. Running Mon→Wed shows how the estimate moves as weather data updates — "
+                "the *direction* of revision is often more informative than the level.")
 
-    df = _load_dataset()
-    cons_df = _load_consensus()
-
-    if df is None:
-        st.warning("no dataset found. run backtest first.")
+    if not REVISIONS.exists():
+        st.info("No runs logged yet. Run a nowcast first.")
         st.stop()
+    rev = pd.read_csv(REVISIONS, parse_dates=["run_date", "week_ending"])
+    week = st.selectbox("Storage week", sorted(rev["week_ending"].unique(), reverse=True),
+                        format_func=lambda w: f"{pd.Timestamp(w):%b %d, %Y}")
+    wk = rev[rev["week_ending"] == week].sort_values("run_date")
+    wk["revision"] = wk["pred_bcf"].diff()
 
-    if "pred_bcf" not in df.columns:
-        st.warning("no predictions in dataset. run backtest first.")
-        st.stop()
-
-    # merge consensus
-    if not cons_df.empty:
-        df = df.merge(cons_df[["report_period_ending", "consensus_bcf"]], on="report_period_ending", how="left")
-    else:
-        df["consensus_bcf"] = np.nan
-
-    # add errors
-    df["model_error"] = (df["pred_bcf"] - df["storage_change_bcf"]).abs()
-    df["consensus_error"] = (df["consensus_bcf"] - df["storage_change_bcf"]).abs()
-
-    # ── upload consensus CSV ──────────────────────────────────────
-    st.subheader("add consensus data")
-    st.markdown("upload a CSV with columns: `report_period_ending` (YYYY-MM-DD), `consensus_bcf`")
-
-    uploaded = st.file_uploader("consensus CSV", type=["csv"])
-    if uploaded:
-        try:
-            new_cons = pd.read_csv(uploaded, parse_dates=["report_period_ending"])
-            new_cons["report_period_ending"] = new_cons["report_period_ending"].dt.date
-            new_cons["source"] = "upload"
-            existing = _load_consensus()
-            combined = pd.concat([existing, new_cons], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["report_period_ending"], keep="last")
-            _save_consensus(combined)
-            st.success(f"saved {len(new_cons)} consensus entries")
-            st.rerun()
-        except Exception as e:
-            st.error(f"failed to parse CSV: {e}")
-
-    # ── manual entry ──────────────────────────────────────────────
-    with st.expander("or enter manually"):
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            manual_week = st.date_input("week ending (Friday)", value=_most_recent_friday(date.today()))
-        with mc2:
-            manual_bcf = st.number_input("consensus (Bcf)", value=0.0, step=1.0)
-        if st.button("save consensus entry"):
-            existing = _load_consensus()
-            new_row = pd.DataFrame([{
-                "report_period_ending": manual_week,
-                "consensus_bcf": manual_bcf,
-                "source": "manual",
-            }])
-            combined = pd.concat([existing, new_row], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["report_period_ending"], keep="last")
-            _save_consensus(combined)
-            st.success("saved")
-
-    # ── comparison table ──────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("comparison (recent weeks)")
-
-    has_consensus = df["consensus_bcf"].notna()
-    if has_consensus.any():
-        comp = df[has_consensus].copy()
-        comp = comp.sort_values("report_period_ending", ascending=False).head(20)
-
-        display_cols = [
-            "report_period_ending", "storage_change_bcf", "pred_bcf",
-            "model_error", "consensus_bcf", "consensus_error", "regime",
-        ]
-        display_cols = [c for c in display_cols if c in comp.columns]
-        st.dataframe(comp[display_cols].reset_index(drop=True))
-
-        # who wins?
-        model_wins = (comp["model_error"] < comp["consensus_error"]).sum()
-        total = len(comp)
-        st.metric(
-            "model closer to actual than consensus",
-            f"{model_wins}/{total} weeks ({model_wins/total*100:.0f}%)"
+    if len(wk) > 1:
+        st.altair_chart(
+            alt.Chart(wk).mark_line(point=True, color=MODEL).encode(
+                x=alt.X("run_date:T", title="run date"),
+                y=alt.Y("pred_bcf:Q", title="predicted change (Bcf)", scale=alt.Scale(zero=False)),
+            ).properties(height=260),
+            width="stretch",
         )
     else:
-        st.info("no consensus data entered yet. add some above to see comparisons.")
-
-    # ── chart: actual vs model vs consensus ───────────────────────
-    if has_consensus.any():
-        comp = df[has_consensus].sort_values("report_period_ending")
-        fig, ax = plt.subplots(figsize=(12, 5))
-        dates = pd.to_datetime(comp["report_period_ending"])
-        ax.plot(dates, comp["storage_change_bcf"], "o-", label="EIA actual", color="#2563eb", markersize=5)
-        ax.plot(dates, comp["pred_bcf"], "s--", label="model", color="#dc2626", markersize=4)
-        ax.plot(dates, comp["consensus_bcf"], "^--", label="consensus", color="#16a34a", markersize=4)
-        ax.set_ylabel("Bcf")
-        ax.legend()
-        plt.tight_layout()
-        st.pyplot(fig)
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  PAGE: REVISION TRACKER
-# ═══════════════════════════════════════════════════════════════════
-
-elif page == "revision tracker":
-    st.title("revision tracker")
-    st.markdown(
-        "each time you run `python run.py live` or use the live nowcast page, "
-        "the prediction gets logged here. track how the forecast revises day-to-day "
-        "as weather updates."
-    )
-
-    revisions = _load_revisions()
-    if revisions is None or revisions.empty:
-        st.info("no revisions logged yet. run a live nowcast first.")
-        st.stop()
-
-    # pick a week to view
-    weeks = sorted(revisions["week_ending"].dropna().unique(), reverse=True)
-    selected_week = st.selectbox("select storage week", weeks)
-
-    wk_data = revisions[revisions["week_ending"] == selected_week].sort_values("run_date")
-
-    if len(wk_data) > 1:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(wk_data["run_date"], wk_data["pred_bcf"], "o-", color="#2563eb", markersize=6)
-        if wk_data["consensus_bcf"].notna().any():
-            cons_val = wk_data["consensus_bcf"].dropna().iloc[-1]
-            ax.axhline(cons_val, color="#16a34a", linestyle="--", label=f"consensus ({cons_val:.0f})")
-        ax.set_ylabel("predicted Δ storage (Bcf)")
-        ax.set_xlabel("run date")
-        ax.legend()
-        plt.tight_layout()
-        st.pyplot(fig)
-
-        # revision deltas
-        wk_data = wk_data.copy()
-        wk_data["revision"] = wk_data["pred_bcf"].diff()
-        st.dataframe(wk_data[["run_date", "pred_bcf", "revision", "week_hdd", "consensus_bcf"]].reset_index(drop=True))
-    else:
-        st.dataframe(wk_data.reset_index(drop=True))
-        st.info("only 1 run for this week. run the live nowcast again tomorrow to see revisions.")
+        st.caption("Only one run for this week so far — run it again tomorrow to see a revision.")
+    st.dataframe(wk[["run_date", "pred_bcf", "revision", "week_hdd", "consensus_bcf", "gap_bcf"]],
+                 width="stretch", hide_index=True)

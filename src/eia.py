@@ -7,7 +7,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from pathlib import Path
+
 from .config import EIA_API_KEY, EIA_V2_BASE, SERIES_WORKING_GAS
+
+CACHE_FILE = Path("cache/eia_storage.csv")
 
 
 class EIAKeyMissing(RuntimeError):
@@ -66,7 +70,16 @@ def get_storage(start: str = "2014-01-01") -> pd.DataFrame:
         working_gas_bcf       (float)
         storage_change_bcf    (float) - week-over-week diff
     """
-    raw = fetch_series(SERIES_WORKING_GAS, start=start)
+    # cache the raw series so the app still runs offline / without a key
+    try:
+        raw = fetch_series(SERIES_WORKING_GAS, start="2010-01-01")
+        raw.to_csv(CACHE_FILE, index=False)
+    except (EIAKeyMissing, requests.RequestException) as e:
+        if not CACHE_FILE.exists():
+            raise
+        print(f"  warning: EIA unavailable ({type(e).__name__}), using {CACHE_FILE}")
+        raw = pd.read_csv(CACHE_FILE, parse_dates=["date"])
+    raw = raw[raw["date"] >= pd.Timestamp(start)]
     raw = raw.rename(columns={"value": "working_gas_bcf"})
     raw["report_period_ending"] = raw["date"].dt.date
     raw = raw.sort_values("report_period_ending").reset_index(drop=True)

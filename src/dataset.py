@@ -35,7 +35,8 @@ def _add_features(df: pd.DataFrame) -> pd.DataFrame:
     # ── rolling stats (backward only) ────────────────────────────────
     df["hdd_roll4_mean"] = df["week_hdd"].rolling(4, min_periods=1).mean()
     df["hdd_roll4_std"]  = df["week_hdd"].rolling(4, min_periods=1).std().fillna(0)
-    df["chg_roll4_mean"] = df["storage_change_bcf"].rolling(4, min_periods=1).mean()
+    # shift(1): this week's storage change is the target, so it can't be in its own feature
+    df["chg_roll4_mean"] = df["storage_change_bcf"].shift(1).rolling(4, min_periods=1).mean()
 
     # ── HDD deviation from seasonal norm ─────────────────────────────
     # expanding mean of HDD for same week-of-year (uses only past data)
@@ -83,8 +84,9 @@ def build_dataset(start: str = "2014-01-01") -> pd.DataFrame:
     week_endings = sorted(storage["report_period_ending"].unique())
 
     print("[2/3] pulling NOAA CPC degree-day actuals...")
-    hdd = fetch_hdd_actuals()
-    cdd = fetch_cdd_actuals()
+    years = list(range(int(start[:4]), date.today().year + 1))
+    hdd = fetch_hdd_actuals(years)
+    cdd = fetch_cdd_actuals(years)
     weekly_dd = build_weekly_dd(hdd, cdd, week_endings)
 
     print("[3/3] merging + engineering features...")

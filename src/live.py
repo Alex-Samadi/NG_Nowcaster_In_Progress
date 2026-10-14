@@ -23,6 +23,18 @@ from .dataset import FEATURE_COLS, _add_features
 from .model import load_model, TrainedModel
 
 
+def divergence_signal(gap_bcf: float) -> tuple[str, str]:
+    """(strength, direction) for a model-minus-consensus gap"""
+    a = abs(gap_bcf)
+    strength = "neutral" if a < 5 else "moderate" if a < 15 else "high" if a < 25 else "extreme"
+    if strength == "neutral":
+        return strength, "no edge: model agrees with consensus"
+    # works in both seasons: below consensus = less gas in storage than expected
+    direction = ("bullish: model sees less gas in storage than consensus" if gap_bcf < 0
+                 else "bearish: model sees more gas in storage than consensus")
+    return strength, direction
+
+
 def _most_recent_friday(d: date) -> date:
     """return the most recent Friday on or before d"""
     wd = d.weekday()  # Mon=0 ... Sun=6

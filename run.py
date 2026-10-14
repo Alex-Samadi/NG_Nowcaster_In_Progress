@@ -17,7 +17,7 @@ import pandas as pd
 
 def cmd_backtest(args):
     from src.dataset import build_dataset, FEATURE_COLS, TARGET_COL
-    from src.model import train, classify_regime, save_model
+    from src.model import train, classify_regime, save_model, walk_forward
 
     df = build_dataset(start=args.start)
 
@@ -40,8 +40,17 @@ def cmd_backtest(args):
         "test_mae": round(tm.test_mae, 2),
         "test_rmse": round(tm.test_rmse, 2),
         "test_mape_big_weeks": round(tm.test_mape_big, 2) if pd.notna(tm.test_mape_big) else None,
+        "test_start": str(tm.test_start),
+        "baseline_test_mae": {k: round(v, 2) for k, v in tm.baseline_mae.items()},
     }
     Path("outputs/metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    # walk-forward: one train/test split per year, so one lucky split can't flatter the model
+    first = pd.to_datetime(df["report_period_ending"]).dt.year.min() + 5
+    wf = walk_forward(df, range(first, date.today().year + 1))
+    wf.to_csv("outputs/walk_forward.csv", index=False)
+    print("\nwalk-forward MAE (Bcf) by test year:")
+    print(wf.to_string(index=False))
 
     print("\n-- backtest results -------------------------")
     print(f"  train MAE:  {tm.train_mae:.2f} Bcf")
@@ -49,6 +58,8 @@ def cmd_backtest(args):
     print(f"  test  RMSE: {tm.test_rmse:.2f} Bcf")
     if pd.notna(tm.test_mape_big):
         print(f"  test  MAPE (|actual|>=50): {tm.test_mape_big:.1f}%")
+    for name, mae in tm.baseline_mae.items():
+        print(f"  baseline {name} MAE: {mae:.2f} Bcf")
     print("---------------------------------------------")
     print(f"\nsaved: outputs/weekly_dataset.csv, outputs/metrics.json, models/model.joblib")
 
@@ -60,7 +71,7 @@ def cmd_backtest(args):
 
 
 def cmd_live(args):
-    from src.live import nowcast, log_revision
+    from src.live import nowcast, log_revision, divergence_signal
 
     week_end = None
     if args.week and args.week != "recent":
@@ -83,18 +94,8 @@ def cmd_live(args):
         print(f"\n  consensus:            {consensus:+.1f} Bcf")
         print(f"  gap (model-consensus):{result['gap_bcf']:+.1f} Bcf")
 
-        abs_gap = abs(result['gap_bcf'])
-        if abs_gap < 5:
-            signal = "NEUTRAL - model ~ consensus"
-        elif abs_gap < 15:
-            signal = "MODERATE divergence"
-        elif abs_gap < 25:
-            signal = "HIGH divergence"
-        else:
-            signal = "EXTREME divergence"
-
-        direction = "BULLISH (larger draw)" if result['gap_bcf'] < 0 else "BEARISH (smaller draw)"
-        print(f"  signal:               {signal} -> {direction}")
+        strength, direction = divergence_signal(result['gap_bcf'])
+        print(f"  signal:               {strength.upper()} divergence -> {direction}")
 
     print("---------------------------------------------\n")
 

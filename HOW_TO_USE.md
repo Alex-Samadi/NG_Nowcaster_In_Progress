@@ -44,7 +44,7 @@ source ~/.bashrc
 
 ### 4. Train the Model (Run Once, Then Periodically)
 ```bash
-python run.py backtest --start 2014-01-01 --test-years 2
+python run.py backtest --start 2010-01-01 --test-years 2
 ```
 
 This pulls all historical data, trains the model, and saves everything. Takes 1-2 minutes depending on your connection. Re-run this every month or so to incorporate new data.
@@ -123,7 +123,7 @@ Negative = withdrawal (bullish gas). Positive = injection (bearish gas).
 ```
 confidence band:      [-256.7, -216.7]
 ```
-Based on the model's test RMSE (~20 Bcf). The actual EIA number should land within this range most of the time. If consensus is OUTSIDE this band, that's a strong divergence signal.
+Based on the model's test RMSE (~19 Bcf). The actual EIA number should land within this range most of the time. If consensus is OUTSIDE this band, that's a strong divergence signal.
 
 ### HDD vs Seasonal
 ```
@@ -163,23 +163,20 @@ Launch it:
 streamlit run app.py
 ```
 
-### Live Nowcast Page
-- Pick the EIA report date (Thursday)
-- It auto-calculates the covered storage week
-- Enter consensus, click "run nowcast"
-- See prediction + gap + signal all in one view
+### Overview Page
+- Headline accuracy vs the 5-year-average benchmark
+- Out-of-sample chart and the year-by-year walk-forward test
 
-### Backtest History Page
+### Nowcast Page
+- Pick the storage week (Friday it ends on); the newest unreported week is at the top
+- Optionally enter consensus, click "Run nowcast"
+- For weeks already reported, the EIA actual is shown next to the prediction
+
+### Backtest Page
 - Model vs actual over the full history
-- Residual distribution (are errors random or biased?)
-- Regime breakdown: see the MAE for weather-dominant vs fundamental-driven weeks separately
+- Feature importance, test-period error distribution, error by regime
 
-### Model vs Consensus Page
-- Upload a CSV of historical consensus estimates
-- See side-by-side: EIA actual vs your model vs consensus
-- Track how often your model is closer to actual than consensus
-
-### Revision Tracker Page
+### Revisions Page
 - Pick a storage week
 - See how your prediction changed day-to-day
 - Visualize revision momentum
@@ -212,14 +209,14 @@ outputs/
   weekly_dataset.csv      # full historical dataset with predictions + regimes
   metrics.json            # model accuracy stats
   revisions.csv           # daily prediction log (builds over time)
-  consensus_history.csv   # your entered consensus values
 
 models/
   model.joblib            # trained model file
 
 cache/
-  hdd_actual_YYYY.csv     # cached weather data (speeds up re-runs)
-  cdd_actual_YYYY.csv
+  hdd_actual_YYYY.txt     # cached weather data (speeds up re-runs)
+  eia_storage.csv         # cached EIA series (offline fallback)
+  cdd_actual_YYYY.txt
 ```
 
 ---

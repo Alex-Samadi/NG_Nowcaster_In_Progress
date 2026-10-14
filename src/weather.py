@@ -17,18 +17,25 @@ CACHE_DIR.mkdir(exist_ok=True)
 CPC_BASE = "https://ftp.cpc.ncep.noaa.gov/htdocs/degree_days/weighted/daily_data"
 
 
-def _download_text(url, cache_name=None):
-    if cache_name:
-        path = CACHE_DIR / cache_name
-        if path.exists():
-            return path.read_text(encoding="utf-8")
+def _download_text(url, cache_name=None, refresh=False):
+    """past years never change, so read them from cache. refresh=True (current
+    year) re-downloads, falling back to the cache when offline."""
+    path = CACHE_DIR / cache_name if cache_name else None
+    if path and path.exists() and not refresh:
+        return path.read_text(encoding="utf-8")
 
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+    except requests.RequestException:
+        if path and path.exists():
+            print(f"  warning: offline, using cached {cache_name}")
+            return path.read_text(encoding="utf-8")
+        raise
     text = r.text
 
-    if cache_name:
-        (CACHE_DIR / cache_name).write_text(text, encoding="utf-8")
+    if path:
+        path.write_text(text, encoding="utf-8")
     return text
 
 
@@ -110,7 +117,7 @@ def fetch_hdd_actuals(years=None):
         url = f"{CPC_BASE}/{yr}/StatesCONUS.Heating.txt"
         cache = f"hdd_actual_{yr}.txt"
         try:
-            text = _download_text(url, cache_name=cache)
+            text = _download_text(url, cache_name=cache, refresh=yr == date.today().year)
             df = _parse_cpc_txt(text)
             if not df.empty:
                 frames.append(df.rename(columns={"dd": "hdd"}))
@@ -133,11 +140,12 @@ def fetch_cdd_actuals(years=None):
         url = f"{CPC_BASE}/{yr}/StatesCONUS.Cooling.txt"
         cache = f"cdd_actual_{yr}.txt"
         try:
-            text = _download_text(url, cache_name=cache)
+            text = _download_text(url, cache_name=cache, refresh=yr == date.today().year)
             df = _parse_cpc_txt(text)
             if not df.empty:
                 frames.append(df.rename(columns={"dd": "cdd"}))
         except Exception as e:
+            print(f"  warning: could not fetch CDD for {yr}: {e}")
             continue
 
     if not frames:

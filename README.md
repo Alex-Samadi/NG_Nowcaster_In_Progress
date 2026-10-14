@@ -1,104 +1,81 @@
 # NG Storage Nowcaster
 
-weather → storage prediction → consensus divergence → edge
+Predicts the weekly EIA natural gas storage change (Bcf) from weather data, days before
+Thursday's report, and flags weeks where the model disagrees with market consensus.
 
-## what this does
+## results
 
-predicts the weekly EIA Natural Gas Storage change (Bcf) using:
-- NOAA CPC gas-weighted HDD / pop-weighted CDD
-- lagged storage changes + rolling stats
-- seasonal encoding (sin/cos week-of-year)
-- HDD deviation from seasonal norm
+Out-of-sample test, Oct 2024 – Oct 2026 (the last 2 years, never seen in training):
 
-then compares your prediction to the street consensus (Celsius, etc.)
-to find weeks where the market may be leaning the wrong way on weather.
+| model | MAE (Bcf) |
+|-------|-----------|
+| **gradient boosting (this model)** | **13.9** |
+| 5-year same-week average (EIA's own benchmark) | 31.1 |
+| "same as last week" | 39.4 |
 
-## the actual edge
+Walk-forward check (train on all prior years, predict the next year, for every year 2015–2026):
+the model beats the 5-year average in **12 / 12 years**, typically by about half.
 
-this model won't beat Celsius on the point estimate. the edge is:
+What I learned along the way:
+- **A plain ridge regression matches the gradient-boosted trees** (13.5 vs 14.6 Bcf average walk-forward MAE; ridge wins 8 of 12 years).
+  Train MAE 5.1 vs test 13.9 shows the trees overfit; most of the signal is close to linear in degree days.
+- **COVID wasn't an outlier for this model.** Mar–Jun 2020 error was 15.0 Bcf vs 14.4 for the rest of 2020
+  (≈ +7 Bcf bias: lockdown demand loss meant bigger injections). Excluding it from training changed MAE by < 0.5 Bcf.
+- **Found and fixed a target leak**: a rolling-mean feature included the current week's storage change.
+  `test_nowcaster.py` guards it.
 
-1. **regime detection** – the model tags weeks as "weather_dominant" or
-   "fundamental_driven" based on how well weather alone explains the move.
-   when you're in a weather-dominant week AND your model disagrees with
-   consensus, that's your highest-conviction signal.
+## how it works
 
-2. **revision tracking** – run the nowcast Mon/Tue/Wed before Thursday's
-   report. watch how the prediction revises as weather updates. the
-   *direction* of revision is often more tradable than the absolute number.
+```
+NOAA CPC daily HDD/CDD ──► sum over Sat→Fri storage week ──┐
+EIA weekly working gas  ──► week-over-week change, lags ────┼─► features ─► model ─► Δ storage (Bcf)
+                                                            │                           │
+                                         consensus (manual) ┴──────────────► gap + regime signal
+```
 
-3. **consensus gap** – enter the Celsius/NGI estimate. the model computes
-   the gap and flags divergence levels (neutral / moderate / high / extreme).
+Features: week HDD/CDD, HDD deviation from seasonal norm, 1–3 week lags of storage change and HDD,
+4-week rolling stats, sin/cos week-of-year, HDD × season interactions. All backward-looking.
 
-## setup
+## the edge isn't the point estimate
+
+The model won't beat professional estimates (e.g. Celsius) on raw accuracy. The use is:
+
+1. **regime**: when temperatures are far from normal, weather explains most of the move, so a model-vs-consensus
+   gap is meaningful. When weather is near normal, LNG exports / production / power burn dominate. Be skeptical.
+2. **revisions**: run Mon→Wed as weather data updates; the *direction* of revision is often more informative than the level.
+3. **consensus gap**: neutral (< 5 Bcf) / moderate / high / extreme (> 25 Bcf).
+
+## run it
 
 ```bash
-python -m venv .venv
-source .venv/Scripts/activate   # Git Bash on Windows
 pip install -r requirements.txt
-export EIA_API_KEY="your_key_here"
+python test_nowcaster.py                               # sanity checks
+streamlit run app.py                                   # dashboard (works offline from cache/)
+python run.py backtest --start 2010-01-01              # retrain + walk-forward
+python run.py live --consensus 80    # CLI nowcast
 ```
 
-get your free EIA API key: https://www.eia.gov/opendata/register.php
+Live data needs a free EIA key (https://www.eia.gov/opendata/register.php): `export EIA_API_KEY=...`.
+Without one, the app falls back to the cached series in `cache/`.
 
-## usage
-
-### train the model
-```bash
-python run.py backtest --start 2014-01-01 --test-years 2
-```
-
-### run a live nowcast
-```bash
-# most recent completed storage week
-python run.py live
-
-# specific week + consensus
-python run.py live --week 2026-02-06 --consensus -271
-```
-
-### launch the dashboard
-```bash
-streamlit run app.py
-```
-
-## project structure
+## structure
 
 ```
-├── run.py              # CLI entry point
-├── app.py              # Streamlit dashboard
-├── requirements.txt
-├── src/
-│   ├── config.py       # API keys, URLs, constants
-│   ├── eia.py          # EIA storage data fetcher
-│   ├── weather.py      # NOAA CPC degree-day fetcher
-│   ├── dataset.py      # merge + feature engineering
-│   ├── model.py        # GBRT training + regime detection
-│   └── live.py         # live nowcast logic
-├── models/             # saved model files
-├── outputs/            # dataset, metrics, revisions
-└── cache/              # downloaded weather files
+run.py              CLI: backtest / live
+app.py              Streamlit dashboard
+test_nowcaster.py   leakage, week-alignment and signal checks
+src/
+  eia.py            EIA v2 storage fetch (+ offline cache)
+  weather.py        NOAA CPC degree days (+ cache)
+  dataset.py        merge + feature engineering
+  model.py          training, benchmarks, walk-forward, regime tagging
+  live.py           single-week nowcast + revision log
 ```
 
-## what the model uses
+## known limitations / next steps
 
-| feature | description |
-|---------|-------------|
-| week_hdd | gas-weighted HDD for the storage week (Sat→Fri) |
-| week_cdd | pop-weighted CDD for the storage week |
-| woy_sin/cos | continuous week-of-year encoding |
-| storage_chg_lag1-3 | prior 3 weeks' storage changes |
-| hdd_lag1-3 | prior 3 weeks' HDD |
-| cdd_lag1 | prior week CDD |
-| hdd_roll4_mean/std | 4-week rolling HDD stats |
-| chg_roll4_mean | 4-week rolling storage change |
-| hdd_deviation | HDD vs expanding seasonal mean |
-| hdd_x_sin/cos | HDD × season interaction |
-
-## future improvements
-
-- [ ] add LNG feedgas / dry gas production (daily EIA or genscape)
-- [ ] regional HDD weighting (midwest/east heavier)
-- [ ] freeze-off flags for extreme cold events
-- [ ] ARIMA residual correction layer
-- [ ] probability distribution output (not just point estimate)
-- [ ] automated consensus scraping (if API available)
+- HDD is a simple average across 48 state series; true **gas-consumption weighting** (heavier on Midwest/Northeast) should help.
+- Supply side is missing: LNG feedgas, dry gas production, freeze-offs.
+- The confidence band is ±1 test RMSE; quantile regression would give a real distribution.
+- Regime labels on history use the realized residual (hindsight); the live hint uses HDD deviation instead.
+- Consensus is entered by hand.
