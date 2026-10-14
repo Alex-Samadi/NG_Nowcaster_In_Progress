@@ -22,12 +22,12 @@ REVISIONS = OUTPUTS / "revisions.csv"
 MODEL_F   = Path("models/model.joblib")
 
 ACTUAL, MODEL, BENCH = "#1f2937", "#2563eb", "#d97706"
-SERIES_COLORS = alt.Scale(domain=["EIA actual", "model", "5-yr average"], range=[ACTUAL, MODEL, BENCH])
+SERIES_COLORS = alt.Scale(domain=["EIA actual", "model", "5-year average"], range=[ACTUAL, MODEL, BENCH])
 FEATURE_LABELS = {
     "week_hdd": "heating degree days (this week)",
     "week_cdd": "cooling degree days (this week)",
-    "woy_sin": "time of year (sin)",
-    "woy_cos": "time of year (cos)",
+    "woy_sin": "time of year (sine)",
+    "woy_cos": "time of year (cosine)",
     "storage_chg_lag1": "storage change 1 week ago",
     "storage_chg_lag2": "storage change 2 weeks ago",
     "storage_chg_lag3": "storage change 3 weeks ago",
@@ -35,15 +35,15 @@ FEATURE_LABELS = {
     "hdd_lag2": "heating degree days 2 weeks ago",
     "hdd_lag3": "heating degree days 3 weeks ago",
     "cdd_lag1": "cooling degree days 1 week ago",
-    "hdd_roll4_mean": "heating degree days, 4-week avg",
+    "hdd_roll4_mean": "heating degree days, 4-week average",
     "hdd_roll4_std": "heating degree days, 4-week variability",
-    "chg_roll4_mean": "storage change, prior 4-week avg",
+    "chg_roll4_mean": "storage change, prior 4-week average",
     "hdd_deviation": "heating degree days vs normal",
-    "hdd_x_sin": "heating × time of year (sin)",
-    "hdd_x_cos": "heating × time of year (cos)",
+    "hdd_x_sin": "heating × time of year (sine)",
+    "hdd_x_cos": "heating × time of year (cosine)",
 }
 WF_LABELS = {"ensemble": "ensemble (this model)", "gbrt": "gradient boosting", "ridge": "ridge (linear)",
-             "five_year_avg": "5-yr average"}
+             "five_year_avg": "5-year average"}
 WF_COLORS = alt.Scale(domain=list(WF_LABELS.values()), range=[MODEL, "#93c5fd", "#7c3aed", BENCH])
 
 
@@ -85,7 +85,7 @@ def series_chart(frame: pd.DataFrame, cols: dict, height=320) -> alt.Chart:
 # ── sidebar ──────────────────────────────────────────────────────────
 
 st.sidebar.title("🔥 NG Storage Nowcaster")
-st.sidebar.caption("Predicts the weekly EIA natural gas storage change from weather, before the report drops.")
+st.sidebar.caption("Predicts the weekly EIA (U.S. Energy Information Administration) natural gas storage change from weather, before the report drops. Units are Bcf (billion cubic feet).")
 page = st.sidebar.radio("Page", ["Overview", "Nowcast", "Backtest", "Revisions"], label_visibility="collapsed")
 st.sidebar.divider()
 st.sidebar.caption(
@@ -101,16 +101,16 @@ st.sidebar.caption(
 if page == "Overview":
     st.title("NG Storage Nowcaster")
     st.markdown(
-        "Every Thursday the EIA reports how much natural gas went into or out of US storage, and prices move on it. "
+        "Every Thursday the EIA (U.S. Energy Information Administration) reports how much natural gas went into or out of US storage, and prices move on it. "
         "Most of that number is **weather**: cold weeks burn gas for heat, hot weeks burn it for power. "
-        "This model turns NOAA degree-day data into a storage estimate **days before the report**, "
+        "This model turns NOAA (National Oceanic and Atmospheric Administration) degree-day data into a storage estimate **days before the report**, "
         "then flags weeks where it disagrees with the market consensus."
     )
 
     improvement = 1 - metrics["test_mae"] / base["five_year_avg"]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Model error (test MAE)", f"{metrics['test_mae']:.1f} Bcf")
-    c2.metric("5-yr average error", f"{base['five_year_avg']:.1f} Bcf",
+    c1.metric("Model error (MAE, mean absolute error)", f"{metrics['test_mae']:.1f} Bcf")
+    c2.metric("5-year average error", f"{base['five_year_avg']:.1f} Bcf",
               help="Same week averaged over the prior 5 years — the benchmark EIA itself reports against.")
     c3.metric("Error reduction", f"{improvement:.0%}", help="vs the 5-year-average benchmark")
     if wf is not None:
@@ -119,7 +119,7 @@ if page == "Overview":
 
     st.subheader("Out-of-sample: model vs EIA actual")
     recent = df[df["report_period_ending"] >= test_start - pd.DateOffset(years=1)]
-    cols = {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-yr average"}
+    cols = {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-year average"}
     st.altair_chart(series_chart(recent, cols), width="stretch")
     st.caption("Shaded region = data the model never saw during training. Negative = withdrawal, positive = injection.")
 
@@ -140,7 +140,7 @@ if page == "Overview":
 
     st.subheader("How it works")
     a, b, c, d = st.columns(4)
-    a.markdown("**1 · Weather**  \nNOAA CPC daily heating & cooling degree days, summed over each Sat→Fri storage week.")
+    a.markdown("**1 · Weather**  \nNOAA CPC (Climate Prediction Center) daily heating & cooling degree days, summed over each Sat→Fri storage week.")
     b.markdown("**2 · Features**  \nDegree days, their deviation from seasonal norm, lagged storage changes, seasonality.")
     c.markdown("**3 · Model**  \nAverage of gradient-boosted trees and a linear (ridge) model, trained only on past data.")
     d.markdown("**4 · Signal**  \nCompare to consensus; flag the gap only in weeks where weather is the main driver.")
@@ -170,8 +170,8 @@ elif page == "Nowcast":
         format_func=lambda w: f"{w:%a %b %d, %Y}" + ("  —  not yet reported" if w == nxt else ""),
         help="EIA storage weeks run Saturday→Friday; the report comes out the following Thursday.",
     )
-    consensus = c2.number_input("Consensus (Bcf, optional)", value=None, step=1.0,
-                                placeholder="e.g. -85", help="From Reuters/Bloomberg/NGI. Negative = withdrawal.")
+    consensus = c2.number_input("Consensus (Bcf = billion cubic feet, optional)", value=None, step=1.0,
+                                placeholder="e.g. -85", help="From Reuters, Bloomberg or NGI (Natural Gas Intelligence). Negative = withdrawal.")
 
     if st.button("Run nowcast", type="primary"):
         with st.spinner("Pulling weather + storage data…"):
@@ -186,7 +186,7 @@ elif page == "Nowcast":
         st.divider()
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Predicted change", f"{r['pred_bcf']:+.1f} Bcf")
-        m2.metric("±1 RMSE range", f"{r['confidence_lo']:+.0f} to {r['confidence_hi']:+.0f}")
+        m2.metric("±1 RMSE range (root mean squared error)", f"{r['confidence_lo']:+.0f} to {r['confidence_hi']:+.0f}")
         m3.metric("Heating degree days", f"{r['week_hdd']:.0f}", f"{r['hdd_deviation']:+.0f} vs normal",
                   delta_color="off")
         if week in actuals.index:
@@ -199,7 +199,7 @@ elif page == "Nowcast":
             st.info("**Weather-driven week.** Temperatures were far from normal, so weather explains most of "
                     "this week's move — a gap vs consensus is most meaningful here.")
         else:
-            st.info("**Near-normal weather.** LNG exports, production and power burn matter more this week; "
+            st.info("**Near-normal weather.** LNG (liquefied natural gas) exports, production and power burn matter more this week; "
                     "treat any gap vs consensus with caution.")
 
         if r["gap_bcf"] is not None:
@@ -219,12 +219,12 @@ elif page == "Backtest":
     st.title("Backtest")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Train MAE", f"{metrics['train_mae']:.1f} Bcf")
-    c2.metric("Test MAE", f"{metrics['test_mae']:.1f} Bcf")
-    c3.metric("Test RMSE", f"{metrics['test_rmse']:.1f} Bcf")
+    c1.metric("Train MAE (mean absolute error)", f"{metrics['train_mae']:.1f} Bcf")
+    c2.metric("Test MAE (mean absolute error)", f"{metrics['test_mae']:.1f} Bcf")
+    c3.metric("Test RMSE (root mean squared error)", f"{metrics['test_rmse']:.1f} Bcf")
 
     st.subheader("Full history")
-    st.altair_chart(series_chart(df, {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-yr average"}, height=280),
+    st.altair_chart(series_chart(df, {"storage_change_bcf": "EIA actual", "pred_bcf": "model", "five_yr_avg": "5-year average"}, height=280),
                     width="stretch")
 
     left, right = st.columns(2)
@@ -246,7 +246,7 @@ elif page == "Backtest":
                 width="stretch",
             )
         else:
-            st.caption("Feature importance is shown for the GBRT model only.")
+            st.caption("Feature importance is shown for the gradient boosting model only.")
 
     with right:
         st.subheader("Test-period errors")
@@ -267,10 +267,10 @@ elif page == "Backtest":
         ).round(1)
         st.dataframe(reg, width="stretch")
         st.caption("Regime is tagged after the fact: *weather_dominant* weeks are ones the weather model explained well; "
-                   "*fundamental_driven* ones had something else (LNG, production, power burn) move storage.")
+                   "*fundamental_driven* ones had something else (LNG (liquefied natural gas) exports, production, power burn) move storage.")
 
     if wf is not None:
-        st.subheader("Walk-forward by year (MAE, Bcf)")
+        st.subheader("Walk-forward by year (MAE = mean absolute error, in Bcf)")
         st.dataframe(wf.rename(columns=WF_LABELS).set_index("year"), width="stretch")
 
     with st.expander("Last 20 weeks of data"):
