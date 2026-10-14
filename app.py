@@ -262,21 +262,13 @@ elif page == "Backtest":
         bias = test["residual"].mean()
         st.caption(f"Mean error {bias:+.1f} Bcf — {'roughly unbiased' if abs(bias) < 3 else 'some systematic bias'}.")
 
-        st.subheader("Error by regime")
-        reg = test.groupby("regime")["residual"].agg(
-            weeks="count", MAE=lambda x: x.abs().mean()
-        ).round(1)
-        st.dataframe(reg, width="stretch")
-        st.caption("Regime is tagged after the fact: *weather_dominant* weeks are ones the weather model explained well; "
-                   "*fundamental_driven* ones had something else (LNG (liquefied natural gas) exports, production, power burn) move storage.")
-
     if wf is not None:
         st.subheader("Walk-forward by year (MAE = mean absolute error, in Bcf)")
         st.dataframe(wf.rename(columns=WF_LABELS).set_index("year"), width="stretch")
 
     with st.expander("Last 20 weeks of data"):
         cols = ["report_period_ending", "storage_change_bcf", "pred_bcf", "residual",
-                "week_hdd", "week_cdd", "hdd_deviation", "regime"]
+                "week_hdd", "week_cdd", "hdd_deviation"]
         st.dataframe(df[cols].tail(20).iloc[::-1].reset_index(drop=True), width="stretch")
 
 
@@ -296,7 +288,7 @@ elif page == "Revisions":
     weeks = sorted(rev["week_ending"].unique(), reverse=True)
     counts = rev["week_ending"].value_counts()
     week = st.selectbox("Storage week", weeks, index=weeks.index(counts.idxmax()),
-                        format_func=lambda w: f"Week ending {pd.Timestamp(w):%b %d, %Y}  ({counts[w]} runs)")
+                        format_func=lambda w: f"Week ending {pd.Timestamp(w):%b %d, %Y}  ({counts[w]} run{'s' if counts[w] != 1 else ''})")
     # one point per day: if a day was run more than once, keep its last run
     wk = rev[rev["week_ending"] == week].sort_values("run_date").groupby("run_date", as_index=False).last()
     wk["revision"] = wk["pred_bcf"].diff()
