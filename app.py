@@ -168,7 +168,7 @@ elif page == "Nowcast":
     c1, c2 = st.columns([2, 1])
     week = c1.selectbox(
         "Storage week ending (Friday)", weeks,
-        format_func=lambda w: f"{w:%a %b %d, %Y}" + ("  —  not yet reported" if w == nxt else ""),
+        format_func=lambda w: f"{w:%a %b %d, %Y}" + ("  —  not in my data yet" if w == nxt else ""),
         help="EIA storage weeks run Saturday→Friday; the report comes out the following Thursday.",
     )
     consensus = c2.number_input("Consensus (Bcf = billion cubic feet, optional)", value=None, step=1.0,
