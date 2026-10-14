@@ -9,16 +9,28 @@ Out-of-sample test, Oct 2024 – Oct 2026 (the last 2 years, never seen in train
 
 | model | MAE (Bcf) |
 |-------|-----------|
-| **gradient boosting (this model)** | **13.9** |
+| **ensemble: average of gradient boosting + ridge (this model)** | **12.8** |
 | 5-year same-week average (EIA's own benchmark) | 31.1 |
 | "same as last week" | 39.4 |
 
-Walk-forward check (train on all prior years, predict the next year, for every year 2015–2026):
-the model beats the 5-year average in **12 / 12 years**, typically by about half.
+Walk-forward check (train on all prior years, predict the next year, for every year 2015–2026, 614 weeks):
+
+| model | avg MAE (Bcf) | worst miss | weeks off by > 40 |
+|-------|---------------|------------|-------------------|
+| **ensemble** | **13.2** | **69** | **17** |
+| ridge (linear) alone | 13.6 | 73 | 22 |
+| gradient boosting alone | 14.6 | 108 | 18 |
+| 5-year average | ~30 | | |
+
+The ensemble beats the 5-year average in **12 / 12 years** and beats gradient boosting alone in 12 / 12.
+A bootstrap over the 614 weeks puts its edge over gradient boosting at 0.9–2.0 Bcf/week (not luck);
+its edge over ridge alone (−0.1 to 1.0) is too small to call. The 50/50 weights are fixed, not tuned on test data.
 
 What I learned along the way:
-- **A plain ridge regression matches the gradient-boosted trees** (13.5 vs 14.6 Bcf average walk-forward MAE; ridge wins 8 of 12 years).
-  Train MAE 5.1 vs test 13.9 shows the trees overfit; most of the signal is close to linear in degree days.
+- **Simple and complex models make different mistakes.** Gradient boosting alone overfit (train MAE 5 vs test 14);
+  ridge alone was steadier. Averaging them cut error ~10% and gave the smallest worst-case miss.
+- **Weather is ~90% of the tree model's decisions.** Heating degree days correlate −0.89 with the storage change;
+  +10 HDD in a winter week ≈ 17 Bcf more withdrawal.
 - **COVID wasn't an outlier for this model.** Mar–Jun 2020 error was 15.0 Bcf vs 14.4 for the rest of 2020
   (≈ +7 Bcf bias: lockdown demand loss meant bigger injections). Excluding it from training changed MAE by < 0.5 Bcf.
 - **Found and fixed a target leak**: a rolling-mean feature included the current week's storage change.
@@ -76,6 +88,6 @@ src/
 
 - HDD is a simple average across 48 state series; true **gas-consumption weighting** (heavier on Midwest/Northeast) should help.
 - Supply side is missing: LNG feedgas, dry gas production, freeze-offs.
-- The confidence band is ±1 test RMSE; quantile regression would give a real distribution.
+- The confidence band is ±1 test RMSE (~16 Bcf); quantile regression would give a real distribution.
 - Regime labels on history use the realized residual (hindsight); the live hint uses HDD deviation instead.
 - Consensus is entered by hand.

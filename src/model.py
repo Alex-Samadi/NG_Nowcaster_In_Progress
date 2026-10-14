@@ -2,7 +2,7 @@
 model.py - train / evaluate / persist nowcast models
 
 pieces:
-    1. GradientBoosting / Ridge regression   (the nowcast)
+    1. ensemble: average of GradientBoosting + Ridge   (the nowcast)
     2. naive benchmarks + walk-forward test   (is it actually better?)
     3. regime tagging                         (weather-dominant vs fundamental-driven weeks)
 """
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import joblib
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import GradientBoostingRegressor, VotingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
@@ -57,22 +57,27 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 # ── training ─────────────────────────────────────────────────────────
 
 def _make_model(model_type: str):
+    gbrt = GradientBoostingRegressor(
+        n_estimators=400,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        min_samples_leaf=10,
+        random_state=42,
+    )
+    ridge = Ridge(alpha=1.0)
     if model_type == "gbrt":
-        return GradientBoostingRegressor(
-            n_estimators=400,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            min_samples_leaf=10,
-            random_state=42,
-        )
-    return Ridge(alpha=1.0)
+        return gbrt
+    if model_type == "ridge":
+        return ridge
+    # ensemble: plain 50/50 average of both (weights deliberately not tuned on test data)
+    return VotingRegressor([("gbrt", gbrt), ("ridge", ridge)])
 
 
 def train(
     df: pd.DataFrame,
     test_years: int = 2,
-    model_type: str = "gbrt",
+    model_type: str = "ensemble",
 ) -> tuple[TrainedModel, pd.DataFrame]:
     """
     time-split train/test, fit model, return (TrainedModel, df_with_preds).
@@ -136,7 +141,7 @@ def walk_forward(df: pd.DataFrame, years: range) -> pd.DataFrame:
             continue
         y = df.loc[te, TARGET_COL]
         row = {"year": yr, "weeks": int(te.sum())}
-        for name in ["gbrt", "ridge"]:
+        for name in ["gbrt", "ridge", "ensemble"]:
             m = _make_model(name).fit(df.loc[tr, FEATURE_COLS].values, df.loc[tr, TARGET_COL].values)
             row[name] = float(np.abs(m.predict(df.loc[te, FEATURE_COLS].values) - y).mean())
         row["five_year_avg"] = float((df.loc[te, "five_yr_avg"] - y).abs().mean())

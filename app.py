@@ -23,8 +23,28 @@ MODEL_F   = Path("models/model.joblib")
 
 ACTUAL, MODEL, BENCH = "#1f2937", "#2563eb", "#d97706"
 SERIES_COLORS = alt.Scale(domain=["EIA actual", "model", "5-yr average"], range=[ACTUAL, MODEL, BENCH])
-WF_LABELS = {"gbrt": "gradient boosting", "ridge": "ridge (linear)", "five_year_avg": "5-yr average"}
-WF_COLORS = alt.Scale(domain=list(WF_LABELS.values()), range=[MODEL, "#7c3aed", BENCH])
+FEATURE_LABELS = {
+    "week_hdd": "heating degree days (this week)",
+    "week_cdd": "cooling degree days (this week)",
+    "woy_sin": "time of year (sin)",
+    "woy_cos": "time of year (cos)",
+    "storage_chg_lag1": "storage change 1 week ago",
+    "storage_chg_lag2": "storage change 2 weeks ago",
+    "storage_chg_lag3": "storage change 3 weeks ago",
+    "hdd_lag1": "heating degree days 1 week ago",
+    "hdd_lag2": "heating degree days 2 weeks ago",
+    "hdd_lag3": "heating degree days 3 weeks ago",
+    "cdd_lag1": "cooling degree days 1 week ago",
+    "hdd_roll4_mean": "heating degree days, 4-week avg",
+    "hdd_roll4_std": "heating degree days, 4-week variability",
+    "chg_roll4_mean": "storage change, prior 4-week avg",
+    "hdd_deviation": "heating degree days vs normal",
+    "hdd_x_sin": "heating × time of year (sin)",
+    "hdd_x_cos": "heating × time of year (cos)",
+}
+WF_LABELS = {"ensemble": "ensemble (this model)", "gbrt": "gradient boosting", "ridge": "ridge (linear)",
+             "five_year_avg": "5-yr average"}
+WF_COLORS = alt.Scale(domain=list(WF_LABELS.values()), range=[MODEL, "#93c5fd", "#7c3aed", BENCH])
 
 
 # ── data ─────────────────────────────────────────────────────────────
@@ -94,7 +114,7 @@ if page == "Overview":
               help="Same week averaged over the prior 5 years — the benchmark EIA itself reports against.")
     c3.metric("Error reduction", f"{improvement:.0%}", help="vs the 5-year-average benchmark")
     if wf is not None:
-        c4.metric("Years beating benchmark", f"{(wf['gbrt'] < wf['five_year_avg']).sum()} / {len(wf)}",
+        c4.metric("Years beating benchmark", f"{(wf['ensemble'] < wf['five_year_avg']).sum()} / {len(wf)}",
                   help="Walk-forward: each year predicted by a model trained only on prior years.")
 
     st.subheader("Out-of-sample: model vs EIA actual")
@@ -122,7 +142,7 @@ if page == "Overview":
     a, b, c, d = st.columns(4)
     a.markdown("**1 · Weather**  \nNOAA CPC daily heating & cooling degree days, summed over each Sat→Fri storage week.")
     b.markdown("**2 · Features**  \nDegree days, their deviation from seasonal norm, lagged storage changes, seasonality.")
-    c.markdown("**3 · Model**  \nGradient-boosted trees, time-split train/test — no shuffling, no look-ahead.")
+    c.markdown("**3 · Model**  \nAverage of gradient-boosted trees and a linear (ridge) model, trained only on past data.")
     d.markdown("**4 · Signal**  \nCompare to consensus; flag the gap only in weeks where weather is the main driver.")
 
 
@@ -132,6 +152,10 @@ if page == "Overview":
 
 elif page == "Nowcast":
     from src.live import nowcast, log_revision, divergence_signal
+
+    @st.cache_data(ttl=3600, show_spinner=False)  # weather/storage data don't change within an hour
+    def cached_nowcast(week, consensus):
+        return nowcast(week_end=week, consensus_bcf=consensus)
 
     st.title("Nowcast a storage week")
 
@@ -152,7 +176,7 @@ elif page == "Nowcast":
     if st.button("Run nowcast", type="primary"):
         with st.spinner("Pulling weather + storage data…"):
             try:
-                st.session_state.result = nowcast(week_end=week, consensus_bcf=consensus)
+                st.session_state.result = cached_nowcast(week, consensus)
                 log_revision(st.session_state.result)
             except Exception as e:
                 st.error(f"Nowcast failed: {e}")
@@ -208,13 +232,17 @@ elif page == "Backtest":
         st.subheader("What drives the prediction")
         import joblib
         tm = joblib.load(MODEL_F)
-        if hasattr(tm.model, "feature_importances_"):
-            imp = pd.DataFrame({"feature": tm.feature_names, "importance": tm.model.feature_importances_})
+        trees = getattr(tm.model, "named_estimators_", {}).get("gbrt", tm.model)
+        if hasattr(trees, "feature_importances_"):
+            imp = pd.DataFrame({"feature": [FEATURE_LABELS.get(f, f) for f in tm.feature_names],
+                                "importance": trees.feature_importances_})
             st.altair_chart(
                 alt.Chart(imp).mark_bar(color=MODEL).encode(
-                    x=alt.X("importance:Q", title="share of splits (GBRT importance)", axis=alt.Axis(format="%")),
-                    y=alt.Y("feature:N", sort="-x", title=None),
-                ).properties(height=380),
+                    x=alt.X("importance:Q", title="importance in the tree half of the ensemble",
+                            axis=alt.Axis(format="%")),
+                    y=alt.Y("feature:N", sort="-x", title=None, axis=alt.Axis(labelOverlap=False, labelLimit=260)),
+                    tooltip=["feature", alt.Tooltip("importance:Q", format=".1%")],
+                ).properties(height=440),
                 width="stretch",
             )
         else:

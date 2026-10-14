@@ -25,7 +25,7 @@ def _download_text(url, cache_name=None, refresh=False):
         return path.read_text(encoding="utf-8")
 
     try:
-        r = requests.get(url, timeout=60)
+        r = requests.get(url, timeout=20)
         r.raise_for_status()
     except requests.RequestException:
         if path and path.exists():

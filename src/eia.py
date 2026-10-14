@@ -22,7 +22,7 @@ def _make_session() -> requests.Session:
     """session w/ automatic retries on transient failures"""
     s = requests.Session()
     retries = Retry(
-        total=6,
+        total=2,  # fail fast; get_storage falls back to the cache
         backoff_factor=0.8,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
@@ -46,7 +46,7 @@ def fetch_series(series_id: str, start: str = "2014-01-01") -> pd.DataFrame:
     params = {"api_key": EIA_API_KEY, "start": start}
 
     sess = _make_session()
-    r = sess.get(url, params=params, timeout=(10, 180))
+    r = sess.get(url, params=params, timeout=(5, 30))
     r.raise_for_status()
 
     data = r.json().get("response", {}).get("data", [])

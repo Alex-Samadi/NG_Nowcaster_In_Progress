@@ -111,7 +111,7 @@ def main():
     bt = subs.add_parser("backtest", help="build dataset + train + evaluate")
     bt.add_argument("--start", default="2014-01-01", help="earliest EIA data")
     bt.add_argument("--test-years", type=int, default=2, help="hold-out test years")
-    bt.add_argument("--model", default="gbrt", choices=["gbrt", "ridge"])
+    bt.add_argument("--model", default="ensemble", choices=["ensemble", "gbrt", "ridge"])
     bt.set_defaults(func=cmd_backtest)
 
     # live

@@ -1,9 +1,9 @@
 {
-  "train_mae": 5.11,
-  "train_rmse": 6.56,
-  "test_mae": 13.86,
-  "test_rmse": 18.02,
-  "test_mape_big_weeks": 14.08,
+  "train_mae": 8.42,
+  "train_rmse": 10.82,
+  "test_mae": 12.77,
+  "test_rmse": 15.87,
+  "test_mape_big_weeks": 12.67,
   "test_start": "2024-10-02",
   "baseline_test_mae": {
     "last_week": 39.39,

@@ -123,7 +123,7 @@ Negative = withdrawal (bullish gas). Positive = injection (bearish gas).
 ```
 confidence band:      [-256.7, -216.7]
 ```
-Based on the model's test RMSE (~19 Bcf). The actual EIA number should land within this range most of the time. If consensus is OUTSIDE this band, that's a strong divergence signal.
+Based on the model's test RMSE (~16 Bcf). The actual EIA number should land within this range most of the time. If consensus is OUTSIDE this band, that's a strong divergence signal.
 
 ### HDD vs Seasonal
 ```
