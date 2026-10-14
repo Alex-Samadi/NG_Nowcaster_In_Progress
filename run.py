@@ -80,7 +80,8 @@ def cmd_live(args):
     consensus = args.consensus
 
     print("\n-- live nowcast -----------------------------")
-    result = nowcast(week_end=week_end, consensus_bcf=consensus)
+    as_of = date.fromisoformat(args.as_of) if args.as_of else None
+    result = nowcast(week_end=week_end, consensus_bcf=consensus, as_of=as_of)
 
     print(f"\n  storage week ending:  {result['week_ending']}")
     print(f"  predicted storage:    {result['pred_bcf']:+.1f} Bcf")
@@ -99,7 +100,7 @@ def cmd_live(args):
 
     print("---------------------------------------------\n")
 
-    log_revision(result)
+    log_revision(result, run_date=as_of, note="replay" if as_of else "")
     print("  revision logged -> outputs/revisions.csv")
 
 
@@ -109,7 +110,7 @@ def main():
 
     # backtest
     bt = subs.add_parser("backtest", help="build dataset + train + evaluate")
-    bt.add_argument("--start", default="2014-01-01", help="earliest EIA data")
+    bt.add_argument("--start", default="2010-01-01", help="earliest EIA data")
     bt.add_argument("--test-years", type=int, default=2, help="hold-out test years")
     bt.add_argument("--model", default="ensemble", choices=["ensemble", "gbrt", "ridge"])
     bt.set_defaults(func=cmd_backtest)
@@ -118,6 +119,7 @@ def main():
     lv = subs.add_parser("live", help="nowcast for upcoming/recent storage week")
     lv.add_argument("--week", default=None, help="week-ending Friday (YYYY-MM-DD) or 'recent'")
     lv.add_argument("--consensus", type=float, default=None, help="consensus estimate (Bcf)")
+    lv.add_argument("--as-of", default=None, help="replay as of a past day (YYYY-MM-DD); later weather = normal")
     lv.set_defaults(func=cmd_live)
 
     args = parser.parse_args()

@@ -42,15 +42,32 @@ def _most_recent_friday(d: date) -> date:
     return d - timedelta(days=delta)
 
 
+def _as_of(daily: pd.DataFrame, col: str, as_of: date, week_end: date) -> pd.DataFrame:
+    """keep only days observed before as_of; fill the rest of the target week
+    with the normal for that calendar day (average of the prior years)"""
+    daily = daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"]).dt.date
+    known = daily[daily["date"] < as_of]
+    md = pd.to_datetime(known["date"]).dt.strftime("%m-%d")
+    normal = known.groupby(md.values)[col].mean()
+    missing = [week_end - timedelta(days=i) for i in range(7) if week_end - timedelta(days=i) >= as_of]
+    fill = pd.DataFrame({"date": missing, col: [normal[d.strftime("%m-%d")] for d in missing]})
+    return pd.concat([known, fill], ignore_index=True)
+
+
 def nowcast(
     week_end: date | None = None,
     model_path: Path | None = None,
     consensus_bcf: float | None = None,
+    as_of: date | None = None,
 ) -> dict:
     """
     produce a nowcast dict with:
         week_ending, pred_bcf, confidence_lo, confidence_hi,
         week_hdd, week_cdd, consensus_bcf, gap_bcf, regime_hint
+
+    as_of: replay the nowcast as it would have run on that past day. weather
+    from as_of onward is unknown, so those days get normal (average) weather.
     """
     if week_end is None:
         week_end = _most_recent_friday(date.today())
@@ -61,8 +78,11 @@ def nowcast(
     storage = get_storage(start="2020-01-01")
 
     # pull degree-days
-    hdd_daily = fetch_hdd_actuals(years=list(range(2020, date.today().year + 1)))
-    cdd_daily = fetch_cdd_actuals(years=list(range(2020, date.today().year + 1)))
+    hdd_daily = fetch_hdd_actuals(years=list(range(2015, date.today().year + 1)))
+    cdd_daily = fetch_cdd_actuals(years=list(range(2015, date.today().year + 1)))
+    if as_of is not None:
+        hdd_daily = _as_of(hdd_daily, "hdd", as_of, week_end)
+        cdd_daily = _as_of(cdd_daily, "cdd", as_of, week_end)
 
     # include target week in the endings list
     all_endings = sorted(set(storage["report_period_ending"].tolist() + [week_end]))
@@ -129,14 +149,15 @@ def nowcast(
     return result
 
 
-def log_revision(result: dict, path: Path | None = None):
+def log_revision(result: dict, path: Path | None = None, run_date: date | None = None, note: str = ""):
     """append nowcast result to revision CSV"""
     if path is None:
         path = Path("outputs/revisions.csv")
     path.parent.mkdir(exist_ok=True)
 
     row = {
-        "run_date": date.today().isoformat(),
+        "run_date": (run_date or date.today()).isoformat(),
+        "note": note,
         "week_ending": result["week_ending"],
         "pred_bcf": result["pred_bcf"],
         "week_hdd": result["week_hdd"],

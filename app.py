@@ -109,7 +109,8 @@ if page == "Overview":
 
     improvement = 1 - metrics["test_mae"] / base["five_year_avg"]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Model error (MAE, mean absolute error)", f"{metrics['test_mae']:.1f} Bcf")
+    c1.metric("Model's average miss", f"{metrics['test_mae']:.1f} Bcf",
+              help="MAE (mean absolute error) on the last 2 years, which the model never saw in training.")
     c2.metric("5-year average error", f"{base['five_year_avg']:.1f} Bcf",
               help="Same week averaged over the prior 5 years — the benchmark EIA itself reports against.")
     c3.metric("Error reduction", f"{improvement:.0%}", help="vs the 5-year-average benchmark")
@@ -292,20 +293,46 @@ elif page == "Revisions":
         st.info("No runs logged yet. Run a nowcast first.")
         st.stop()
     rev = pd.read_csv(REVISIONS, parse_dates=["run_date", "week_ending"])
-    week = st.selectbox("Storage week", sorted(rev["week_ending"].unique(), reverse=True),
-                        format_func=lambda w: f"{pd.Timestamp(w):%b %d, %Y}")
-    wk = rev[rev["week_ending"] == week].sort_values("run_date")
+    weeks = sorted(rev["week_ending"].unique(), reverse=True)
+    counts = rev["week_ending"].value_counts()
+    week = st.selectbox("Storage week", weeks, index=weeks.index(counts.idxmax()),
+                        format_func=lambda w: f"Week ending {pd.Timestamp(w):%b %d, %Y}  ({counts[w]} runs)")
+    # one point per day: if a day was run more than once, keep its last run
+    wk = rev[rev["week_ending"] == week].sort_values("run_date").groupby("run_date", as_index=False).last()
     wk["revision"] = wk["pred_bcf"].diff()
 
+    actual = df.loc[df["report_period_ending"] == week, "storage_change_bcf"]
+    consensus = wk["consensus_bcf"].dropna()
+    refs = pd.DataFrame(
+        ([{"label": f"EIA actual ({actual.iloc[0]:+.0f})", "Bcf": actual.iloc[0]}] if len(actual) else [])
+        + ([{"label": f"market estimate ({consensus.iloc[-1]:+.0f})", "Bcf": consensus.iloc[-1]}] if len(consensus) else [])
+    )
+
     if len(wk) > 1:
-        st.altair_chart(
-            alt.Chart(wk).mark_line(point=True, color=MODEL).encode(
-                x=alt.X("run_date:T", title="run date"),
-                y=alt.Y("pred_bcf:Q", title="predicted change (Bcf)", scale=alt.Scale(zero=False)),
-            ).properties(height=260),
-            width="stretch",
+        line = alt.Chart(wk).mark_line(point=True, color=MODEL).encode(
+            x=alt.X("run_date:T", title="day the nowcast was run", axis=alt.Axis(format="%a %b %d")),
+            y=alt.Y("pred_bcf:Q", title="predicted change (Bcf)", scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("run_date:T", title="run", format="%a %b %d"),
+                     alt.Tooltip("pred_bcf:Q", title="model (Bcf)", format="+.1f")],
         )
+        chart = line
+        if not refs.empty:
+            ref_scale = alt.Scale(domain=list(refs["label"]), range=[ACTUAL, BENCH][: len(refs)])
+            rules = alt.Chart(refs).mark_rule(strokeDash=[6, 4], strokeWidth=2).encode(
+                y="Bcf:Q", color=alt.Color("label:N", scale=ref_scale, legend=alt.Legend(orient="top", title=None)))
+            chart = line + rules
+        st.altair_chart(chart.properties(height=300), width="stretch")
     else:
         st.caption("Only one run for this week so far — run it again tomorrow to see a revision.")
-    st.dataframe(wk[["run_date", "pred_bcf", "revision", "week_hdd", "consensus_bcf", "gap_bcf"]],
-                 width="stretch", hide_index=True)
+
+    if (wk["note"] == "replay").any():
+        st.caption("Replayed runs: the model re-run as it would have looked on each day, using only weather "
+                   "observed before that day (days not yet observed assumed to be normal weather).")
+    table = wk.assign(run_date=wk["run_date"].dt.strftime("%a %b %d"),
+                      note=wk["note"].fillna("").replace("replay", "replayed"))
+    st.dataframe(
+        table[["run_date", "pred_bcf", "revision", "week_hdd", "consensus_bcf", "gap_bcf", "note"]].rename(columns={
+            "run_date": "run date", "pred_bcf": "model (Bcf)", "revision": "change vs previous run",
+            "week_hdd": "heating degree days", "consensus_bcf": "market estimate (Bcf)",
+            "gap_bcf": "model − market", "note": "type"}),
+        width="stretch", hide_index=True)
